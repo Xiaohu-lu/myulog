@@ -69,6 +69,22 @@
 #define ULOG_FILTER_KW_MAX_LEN		15
 #endif	/*ULOG_FILTER_KW_MAX_LEN*/
 
+
+
+
+
+/* tag's level filter */
+struct ulog_tag_lvl_filter
+{
+	char tag[ULOG_FILTER_TAG_MAX_LEN + 1];
+	ul_uint32_t level;
+	ul_slist_t	list;
+};
+typedef struct ulog_tag_lvl_filter *ulog_tag_lvl_filter_t;
+
+
+
+
 #endif
 
 

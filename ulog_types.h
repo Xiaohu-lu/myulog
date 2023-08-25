@@ -26,6 +26,15 @@ typedef ul_base_t					ul_off_t;			/**< Type for offset */
 
 #define UL_NULL						(0)		/*NULL*/
 
+
+
+
+#define ul_inline                   static __inline
+
+
+
+
+
 #define UL_ASSERT(EX)						
 
 
