@@ -69,6 +69,9 @@
 #define ULOG_FILTER_KW_MAX_LEN		15
 #endif	/*ULOG_FILTER_KW_MAX_LEN*/
 
+#ifndef ULOG_NEWLINE_SIGN
+#define ULOG_NEWLINE_SIGN			"\r\n"
+#endif
 
 
 

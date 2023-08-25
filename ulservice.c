@@ -3,14 +3,33 @@
 
 
 
+/* ul_memcmp
+ * 比较两个字符串是否相同
+ * cs:		字符串1
+ * ct：		字符串2
+ * count：	要比较的个数
+ * return：相同返回0,否则返回其他
+ */
+ul_int32_t ul_memcmp(const void *cs, const void *ct, ul_ubase_t count)
+{
+	const unsigned char *su1, *su2;
+	int res = 0;
+	for(su1 = (const unsigned char *)cs, su2 = (const unsigned char *)ct; 0 < count; ++su1, ++su2, count--)
+		if((res = *su1 - *su2) != 0)
+			break;
+	return res;
+}
 
 
 
 
 
 
-
-
+/* ul_strstr
+ * s1:		源字符串
+ * s2：		要找的字符串
+ * return:	返回s2第一次在s1中出现的位置
+ */
 char *ul_strstr(const char *s1, const char *s2)
 {
 	int l1, l2;

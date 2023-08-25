@@ -76,4 +76,20 @@ void platform_interrupt_enable(int level)
 #endif
 }
 
+/* platform_getTickCount
+ * 返回当前系统节拍
+ */
+unsigned int platform_getTickCount(void)
+{
+	return xTaskGetTickCount();
+}
+
+/* platform_thread_mdelay
+ * 延时ms毫秒
+ */
+void platform_thread_mdelay(unsigned int ms)
+{
+	vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
 
