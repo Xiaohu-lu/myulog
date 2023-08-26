@@ -836,8 +836,163 @@ void ulog_output(ul_uint32_t level, const char *tag, ul_bool_t newline, const ch
 }
 
 
+void ulog_raw(const char *format,...)
+{
+	ul_size_t log_len = 0;
+	char *log_buf = UL_NULL;
+	va_list args;
+	int fmt_result;
+
+	UL_ASSERT(ulog.init_ok);
+
+#ifdef ULOG_USING_ASYNC_OUTPUT
+	if(ulog.async_rb == UL_NULL)
+	{
+		ulog.async_rb = rt_ringbuffer_create(ULOG_ASYNC_OUTPUT_BUF_SIZE);
+	}
+#endif	/*ULOG_USING_ASYNC_OUTPUT*/
+
+	/* get log buffer */
+	log_buf = get_log_buf();
+
+	/* lock output */
+	output_lock();
+
+	/* args point to the first variable parameter */
+	va_start(args, format);
+	fmt_result = ul_vsnprintf(log_buf, ULOG_LINE_BUF_SIZE, format, args);
+	va_end(args);
+
+	/* calculate log length */
+	if((fmt_result > -1) && (fmt_result <= ULOG_LINE_BUF_SIZE))
+	{
+		log_len = fmt_result;
+	}
+	else
+	{
+		log_len = ULOG_LINE_BUF_SIZE;
+	}
+
+	/* do log output
+	 */
+	do_output(LOG_LVL_DBG, "", UL_TRUE, log_buf, log_len);
+
+	/* unlock output
+	 */
+	output_unlock();
+	
+}
 
 
+void ulog_hexdump(const char *tag, ul_size_t width, const ul_uint8_t *buf, ul_size_t size,...)
+{
+	ul_size_t i, len;
+	va_list args;
+
+	va_start(args, size);
+
+	for(i = 0; i < size; i += width, buf += width)
+	{
+		if(i + width > size)
+			len = size - i;
+		else
+			len = width;
+		ulog_voutput(LOG_LVL_DBG, tag, UL_TRUE, buf, len, width, i, UL_NULL, args);
+	}
+	va_end(args);
+}
+
+
+int ulog_be_lvl_filter_set(const char *be_name, ul_uint32_t level)
+{
+	ul_slist_t *node = UL_NULL;
+	ulog_backend_t backend;
+	int result = RT_EOK;
+
+	if(level > LOG_FILTER_LVL_ALL)
+		return -RT_EINVAL;
+
+	if(!ulog.init_ok)
+		return result;
+
+	for(node = ul_slist_first(&ulog.backend_list); node; node = ul_slist_next(node))
+	{
+		backend = ul_slist_entry(node, struct ulog_backend, list);
+		if(ul_strncmp(backend->name, be_name, UL_NAME_MAX) == 0)
+		{
+			backend->out_level = level;
+		}
+	}
+	return result;
+}
+
+
+
+int ulog_tag_lvl_filter_set(const char *tag, ul_uint32_t level)
+{
+	ul_slist_t *node;
+	ulog_tag_lvl_filter tag_lvl = UL_NULL;
+	int result = RT_EOK;
+
+	if(level > LOG_FILTER_LVL_ALL)
+		return -RT_EINVAL;
+	if(!ulog.init_ok)
+		return result;
+
+	/* lock output */
+	output_lock();
+
+	/* find the tag in list */
+	for(node = ul_slist_first(ulog_tag_lvl_list_get()); node; node = ul_slist_next(node))
+	{
+		tag_lvl = ul_slist_entry(node, struct ulog_tag_lvl_filter, list);
+		if(!ul_strncmp(tag_lvl->tag, tag, ULOG_FILTER_TAG_MAX_LEN))
+		{
+			break;
+		}
+		else
+		{
+			tag_lvl = UL_NULL;
+		}
+	}
+	/* find ok */
+	if(tag_lvl)
+	{
+		if(level == LOG_FILTER_LVL_ALL)
+		{
+			/* remove current tag's level filter when input level is the lowest level */
+			ul_slist_remove(ulog_tag_lvl_list_get(), &tag_lvl->list);
+			ul_free(tag_lvl);
+		}
+		else
+		{
+			/* update level */
+			tag_lvl->level = level;
+		}
+	}
+	else
+	{
+		/* only add the new tag's level filer when level is not LOG_FILTER_LVL_ALL */
+		if(level != LOG_FILTER_LVL_ALL)
+		{
+			/* new a tag's level filter */
+			tag_lvl = (ulog_tag_lvl_filter) rt_malloc(sizeof(struct ulog_tag_lvl_filter));
+			if(tag_lvl)
+			{
+				rt_memset(tag_lvl->tag, 0, sizeof(tag_lvl->tag));
+				rt_strncpy(tag_lvl->tag, tag, ULOG_FILTER_KW_MAX_LEN);
+				tag_lvl->level = level;
+				ul_slist_append(ulog_tag_lvl_list_get(), &tag_lvl->list);
+			}
+			else
+			{
+				result = -RT_ENOMEM;
+			}
+		}
+	}
+	output_unlock();
+	return result;
+}
 
 
 /* ulog_tag_lvl_filter_get
