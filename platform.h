@@ -8,6 +8,9 @@
 /* delay max */
 #define platform_MAX_DELAY			0xFFFFFFFF
 
+/* task name max len */
+#define paltform_NAME_MAX			configMAX_TASK_NAME_LEN
+
 typedef struct platform_mutex
 {
 	SemaphoreHandle_t	mutex;
