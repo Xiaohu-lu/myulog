@@ -1,14 +1,14 @@
 #include "ulservice.h"
-
+#include <stdarg.h>
 
 
 
 /* ul_memcmp
- * æ¯”è¾ƒä¸¤ä¸ªå­—ç¬¦ä¸²æ˜¯å¦ç›¸åŒ
- * cs:		å­—ç¬¦ä¸²1
- * ctï¼š		å­—ç¬¦ä¸²2
- * countï¼š	è¦æ¯”è¾ƒçš„ä¸ªæ•°
- * returnï¼šç›¸åŒè¿”å›0,å¦åˆ™è¿”å›å…¶ä»–
+ * ±È½ÏÁ½¸ö×Ö·û´®ÊÇ·ñÏàÍ¬
+ * cs:		×Ö·û´®1
+ * ct£º		×Ö·û´®2
+ * count£º	Òª±È½ÏµÄ¸öÊı
+ * return£ºÏàÍ¬·µ»Ø0,·ñÔò·µ»ØÆäËû
  */
 ul_int32_t ul_memcmp(const void *cs, const void *ct, ul_ubase_t count)
 {
@@ -26,9 +26,9 @@ ul_int32_t ul_memcmp(const void *cs, const void *ct, ul_ubase_t count)
 
 
 /* ul_strstr
- * s1:		æºå­—ç¬¦ä¸²
- * s2ï¼š		è¦æ‰¾çš„å­—ç¬¦ä¸²
- * return:	è¿”å›s2ç¬¬ä¸€æ¬¡åœ¨s1ä¸­å‡ºç°çš„ä½ç½®
+ * s1:		Ô´×Ö·û´®
+ * s2£º		ÒªÕÒµÄ×Ö·û´®
+ * return:	·µ»Øs2µÚÒ»´ÎÔÚs1ÖĞ³öÏÖµÄÎ»ÖÃ
  */
 char *ul_strstr(const char *s1, const char *s2)
 {
@@ -50,10 +50,10 @@ char *ul_strstr(const char *s1, const char *s2)
 
 
 /* ul_strncpy
- * ä»srcæ‹·è´nå­—èŠ‚åˆ°dst
- * dstï¼š		ç›®çš„åœ°å€
- * srcï¼š		æºæ•°æ®åœ°å€
- * nï¼š		è¦æ‹·è´çš„å­—èŠ‚æ•°
+ * ´Ósrc¿½±´n×Ö½Úµ½dst
+ * dst£º		Ä¿µÄµØÖ·
+ * src£º		Ô´Êı¾İµØÖ·
+ * n£º		Òª¿½±´µÄ×Ö½ÚÊı
  */
 char *ul_strncpy(char *dst, const char *src, ul_ubase_t n)
 {
@@ -81,12 +81,12 @@ char *ul_strncpy(char *dst, const char *src, ul_ubase_t n)
 
 
 /* ul_strlen
- * è¿”å›å­—ç¬¦ä¸²é•¿åº¦,é€šè¿‡æ‰¾'\0'ç¬¦
- * returnï¼š	å­—ç¬¦ä¸²é•¿åº¦
+ * ·µ»Ø×Ö·û´®³¤¶È,Í¨¹ıÕÒ'\0'·û
+ * return£º	×Ö·û´®³¤¶È
  */
 ul_size_t ul_strlen(const char *s)
 {
-	const char *sc;	/*æŒ‡é’ˆé‡Œé¢å†…å®¹ä¸å¯å˜,æŒ‡é’ˆå¯ä»¥å˜*/
+	const char *sc;	/*Ö¸ÕëÀïÃæÄÚÈİ²»¿É±ä,Ö¸Õë¿ÉÒÔ±ä*/
 	for(sc = s; *sc != '\0'; ++sc)
 		;
 	return sc - s;
@@ -96,11 +96,11 @@ ul_size_t ul_strlen(const char *s)
 
 
 /* ul_strncmp
- * æ¯”è¾ƒä¸¤ä¸ªå­—ç¬¦ä¸²æ˜¯å¦ç›¸åŒ
- * cs:		å­—ç¬¦ä¸²1
- * ctï¼š		å­—ç¬¦ä¸²2
- * countï¼š	è¦æ¯”è¾ƒçš„ä¸ªæ•°
- * returnï¼šç›¸åŒè¿”å›0,å¦åˆ™è¿”å›å…¶ä»–
+ * ±È½ÏÁ½¸ö×Ö·û´®ÊÇ·ñÏàÍ¬
+ * cs:		×Ö·û´®1
+ * ct£º		×Ö·û´®2
+ * count£º	Òª±È½ÏµÄ¸öÊı
+ * return£ºÏàÍ¬·µ»Ø0,·ñÔò·µ»ØÆäËû
  */
 ul_int32_t ul_strncmp(const char *cs, const char *ct, ul_ubase_t count)
 {
@@ -117,7 +117,7 @@ ul_int32_t ul_strncmp(const char *cs, const char *ct, ul_ubase_t count)
 
 
 /* private function */
-/* åˆ¤æ–­å­—ç¬¦æ˜¯ä¸æ˜¯æ•°å­—'0123456789'
+/* ÅĞ¶Ï×Ö·ûÊÇ²»ÊÇÊı×Ö'0123456789'
  */
 #define _ISDIGIT(c)		((unsigned)((c) - '0') < 10)	
 
@@ -134,9 +134,9 @@ ul_int32_t ul_strncmp(const char *cs, const char *ct, ul_ubase_t count)
 
 
 /* skip_atoi
- * å­—ç¬¦ä¸²è½¬æ¢ä¸ºintæ•´æ•°
- * sï¼š	è¦è½¬æ¢çš„å­—ç¬¦ä¸²åœ°å€
- * returnï¼š	è½¬æ¢åçš„æ•´æ•°
+ * ×Ö·û´®×ª»»ÎªintÕûÊı
+ * s£º	Òª×ª»»µÄ×Ö·û´®µØÖ·
+ * return£º	×ª»»ºóµÄÕûÊı
  */
 ul_inline int skip_atoi(const char **s)
 {
@@ -145,6 +145,46 @@ ul_inline int skip_atoi(const char **s)
 		i = i * 10 + *((*s)++) - '0';
 	return i;
 }
+
+#ifdef RT_PRINTF_LONGLONG
+ul_inline int divide(long long *n, int base)
+{
+    int res;
+
+    /* optimized for processor which does not support divide instructions. */
+    if (base == 10)
+    {
+        res = (int)(((unsigned long long)*n) % 10U);
+        *n = (long long)(((unsigned long long)*n) / 10U);
+    }
+    else
+    {
+        res = (int)(((unsigned long long)*n) % 16U);
+        *n = (long long)(((unsigned long long)*n) / 16U);
+    }
+
+    return res;
+}
+#else
+ul_inline int divide(long *n, int base)
+{
+    int res;
+
+    /* optimized for processor which does not support divide instructions. */
+    if (base == 10)
+    {
+        res = (int)(((unsigned long)*n) % 10U);
+        *n = (long)(((unsigned long)*n) / 10U);
+    }
+    else
+    {
+        res = (int)(((unsigned long)*n) % 16U);
+        *n = (long)(((unsigned long)*n) / 16U);
+    }
+
+    return res;
+}
+#endif
 
 
 #ifdef UL_PRINTF_PRECISION
@@ -178,7 +218,9 @@ static char *print_number(char *buf,
 #else
 	char tmp[16];
 #endif
+#ifdef UL_PRINTF_PRECISION
 	int precision_bak = precision;
+#endif /*UL_PRINTF_PRECISION*/
 	const char *digits;
 	static const char small_digits[] = "0123456789abcdef";
 	static const char large_digits[] = "0123456789ABCDEF";
@@ -238,7 +280,8 @@ static char *print_number(char *buf,
 	{
 		if((sign) && (size > 0))
 			size-- ;
-		while(size-- > 0)
+		while(size-- > 0
+)
 		{
 			if(buf < end)
 				*buf = ' ';
@@ -296,7 +339,7 @@ static char *print_number(char *buf,
 			*buf = '0';
 		++ buf;
 	}
-#endif /*UL_PRINTF_PRECISION*/
+
 
 	while(i-- > 0 && (precision_bak != 0))
 	{
@@ -304,6 +347,7 @@ static char *print_number(char *buf,
 			*buf = tmp[i];
 		++ buf;
 	}
+#endif /*UL_PRINTF_PRECISION*/
 
 	while(size-- > 0)
 	{
@@ -319,12 +363,12 @@ static char *print_number(char *buf,
 
 
 /* ul_vsnprintf
- * æ ¼å¼åŒ–è¾“å‡ºåˆ°bufç¼“å†²åŒº,%[flags][width][.precision][length]soecifier
- * buf:		æ ¼å¼åçš„ç¼“å†²åŒº
- * sizeï¼š	bufæœ€å¤§å®¹çº³çš„å­—ç¬¦ä¸²ä¸ªæ•°
- * fmtï¼š		æ ¼å¼
- * argsï¼š	å¯å˜å½¢å‚åˆ—è¡¨
- * returnï¼š	æ ¼å¼åŒ–è¾“å‡ºçš„å­—ç¬¦ä¸ªæ•°
+ * ¸ñÊ½»¯Êä³öµ½buf»º³åÇø,%[flags][width][.precision][length]soecifier
+ * buf:		¸ñÊ½ºóµÄ»º³åÇø
+ * size£º	buf×î´óÈİÄÉµÄ×Ö·û´®¸öÊı
+ * fmt£º		¸ñÊ½
+ * args£º	¿É±äĞÎ²ÎÁĞ±í
+ * return£º	¸ñÊ½»¯Êä³öµÄ×Ö·û¸öÊı
  */
 ul_int32_t ul_vsnprintf(char *buf, ul_size_t size, const char *fmt, va_list args)
 {
@@ -349,7 +393,7 @@ ul_int32_t ul_vsnprintf(char *buf, ul_size_t size, const char *fmt, va_list args
 	str = buf;
 	end = buf + size;
 
-	/* ç¡®ä¿endæ€»æ˜¯å¤§äºbuf
+	/* È·±£end×ÜÊÇ´óÓÚbuf
 	 */
 	if(end < buf)
 	{
@@ -367,19 +411,19 @@ ul_int32_t ul_vsnprintf(char *buf, ul_size_t size, const char *fmt, va_list args
 			continue;
 		}
 
-		/* flags ï¼š
-		 * a,Aï¼šä»¥16è¿›åˆ¶å½¢å¼è¾“å‡ºæµ®ç‚¹æ•°
-		 * dï¼š	ä»¥10è¿›åˆ¶è¾“å‡ºå¸¦ç¬¦å·æ•´æ•°(æ­£æ•°ä¸è¾“å‡ºç¬¦å·)
-		 * o:	ä»¥8è¿›åˆ¶è¾“å‡ºæ— ç¬¦å·æ•´æ•°
-		 * x,X:	ä»¥10è¿›åˆ¶è¾“å‡ºæ— ç¬¦å·æ•´æ•°
-		 * u:	ä»¥10è¿›åˆ¶è¾“å‡ºæ— ç¬¦å·æ•´æ•°
-		 * fï¼š	ä»¥å°æ•°å½¢å¼è¾“å‡ºå•ã€åŒç²¾åº¦å®æ•°
+		/* flags £º
+		 * a,A£ºÒÔ16½øÖÆĞÎÊ½Êä³ö¸¡µãÊı
+		 * d£º	ÒÔ10½øÖÆÊä³ö´ø·ûºÅÕûÊı(ÕıÊı²»Êä³ö·ûºÅ)
+		 * o:	ÒÔ8½øÖÆÊä³öÎŞ·ûºÅÕûÊı
+		 * x,X:	ÒÔ10½øÖÆÊä³öÎŞ·ûºÅÕûÊı
+		 * u:	ÒÔ10½øÖÆÊä³öÎŞ·ûºÅÕûÊı
+		 * f£º	ÒÔĞ¡ÊıĞÎÊ½Êä³öµ¥¡¢Ë«¾«¶ÈÊµÊı
 		 * ...
  		 */
 		flags = 0;
 		while(1)
 		{
-			/* è·³è¿‡%ç¬¦å·
+			/* Ìø¹ı%·ûºÅ
  		     */
  		    ++ fmt;
 			if(*fmt == '-') flags |= LEFT;
@@ -391,7 +435,7 @@ ul_int32_t ul_vsnprintf(char *buf, ul_size_t size, const char *fmt, va_list args
 		}
 
 		/* width:
-		 * è¾“å‡ºå­—ç¬¦ä¸è¶³æ˜¯å‰é¢è¾“å‡ºç©ºæ ¼
+		 * Êä³ö×Ö·û²»×ãÊÇÇ°ÃæÊä³ö¿Õ¸ñ
 		 */
 		/* get field width */
 		field_width = -1;
@@ -467,7 +511,7 @@ ul_int32_t ul_vsnprintf(char *buf, ul_size_t size, const char *fmt, va_list args
 				continue;
 
 			case 's':
-				s = va_arg(args, char *)
+				s = va_arg(args, char *);
 				if(!s) s = "(NULL)";
 				for(len = 0; (len != field_width) && (s[len] != '\0'); len++);
 #ifdef UL_PRINTF_PRECISION
@@ -580,11 +624,11 @@ ul_int32_t ul_vsnprintf(char *buf, ul_size_t size, const char *fmt, va_list args
 }
 
 /* ul_snprintf
- * å°†ä¸€ä¸ªæ ¼å¼åŒ–çš„å­—ç¬¦ä¸²å¡«å……åˆ°bufferä¸­
- * bufï¼š	ç¼“å†²åŒº
- * sizeï¼šç¼“å†²åŒºå¤§å°
- * fmtï¼šæ ¼å¼
- * ...ï¼šå½¢å‚
+ * ½«Ò»¸ö¸ñÊ½»¯µÄ×Ö·û´®Ìî³äµ½bufferÖĞ
+ * buf£º	»º³åÇø
+ * size£º»º³åÇø´óĞ¡
+ * fmt£º¸ñÊ½
+ * ...£ºĞÎ²Î
  */
 ul_int32_t ul_snprintf(char *buf, ul_size_t size, const char *fmt, ...)
 {

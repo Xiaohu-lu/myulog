@@ -1,26 +1,57 @@
+/*
+ * ulog.c
+ *
+ *  Created on: Sep 19, 2023
+ *      Author: hxd
+ */
+#include "H01_Device.h"
+
+#include "FreeRTOS.h"
+//#include "task.h"
+//#include "queue.h"
+#include "semphr.h"
+#include "ulogdef.h"
+#include "ringblk_buf.h"
+#include "ringbuffer.h"
+#include "dprintf.h"
+
+#include "ulog.h"
 #include "ulservice.h"
-#include "platform.h"
+#define ULOG_USING_COLOR		/*Ê¹ÓÃÑÕÉ«*/
+#define ULOG_OUTPUT_TIME		/*Ê¹ÓÃTIME*/
+#define ULOG_OUTPUT_LEVEL		/*Ê¹ÓÃµÈ¼¶*/
+#define ULOG_OUTPUT_TAG			/*Ê¹ÓÃ±êÇ©*/
+#define ULOG_USING_FILTER		/*Ê¹ÓÃ¹ıÂËÆ÷*/
+#define ULOG_USING_ASYNC_OUTPUT	/*Ê¹ÓÃÒì²½Êä³ö*/
+
+#define ULOG_ASYNC_OUTPUT_BUF_SIZE 	2048	/*»·ĞÎ¿é´óĞ¡*/
+#define ULOG_ASYNC_OUTPUT_SIZE		2048	/*»·ĞÎ»º³åÇø´óĞ¡*/
+
+
+/* the number which is max stored line logs */
+#ifndef ULOG_ASYNC_OUTPUT_STORE_LINES
+#define ULOG_ASYNC_OUTPUT_STORE_LINES  (ULOG_ASYNC_OUTPUT_BUF_SIZE * 3 / 2 / 80)
+#endif
 
 #ifdef ULOG_USING_COLOR
 /**
  * CSI(Control Sequence Introducer/Initiator) sign
  * more information on https://en.wikipedia.org/wiki/ANSI_escape_code
  */
-#define CSI_START			"\033["
-#define CSI_END				"\033[0m"
+#define CSI_START                      "\033["
+#define CSI_END                        "\033[0m"
 /* output log front color */
-#define F_BLACK				"30m"
-#define F_RED				"31m"
-#define F_GREEN				"32m"
-#define F_YELLOW			"33m"
-#define F_BLUE				"34m"
-#define F_MAGENTA			"35m"
-#define F_CYAN				"36m"
-#define F_WHITE				"37m"
-
+#define F_BLACK                        "30m"
+#define F_RED                          "31m"
+#define F_GREEN                        "32m"
+#define F_YELLOW                       "33m"
+#define F_BLUE                         "34m"
+#define F_MAGENTA                      "35m"
+#define F_CYAN                         "36m"
+#define F_WHITE                        "37m"
 /* output log default color definition */
 #ifndef ULOG_COLOR_DEBUG
-#define ULOG_COLOR_DEBUG               RT_NULL
+#define ULOG_COLOR_DEBUG               NULL
 #endif
 #ifndef ULOG_COLOR_INFO
 #define ULOG_COLOR_INFO                (F_GREEN)
@@ -36,443 +67,313 @@
 #endif
 #endif /* ULOG_USING_COLOR */
 
-#if ULOG_LINE_BUF_SIZE < 80
-#error "the log line buffer size must more than 80"
-#endif	/*ULOG_USING_COLOR*/
-
-
-
-
-/* ulog object struct */
-struct ul_ulog
+struct ulog_t
 {
-	ul_bool_t init_ok;						/*åˆå§‹åŒ–æ ‡å¿—*/
-	ul_bool_t output_lock_enabled;			/*æ˜¯å¦ä½¿èƒ½é”*/
-	platform_mutex_t output_locker;			/*äº’æ–¥é‡å¥æŸ„*/
-	/* all backends */
-	ul_slist_t backend_list;
-	/* the thread log's line buffer */
-	char log_buf_th[ULOG_LINE_BUF_SIZE + 1];/*è¡Œç¼“å†²åŒº*/
+	bool	init_ok;
+	bool	output_lock_enabled;
+	SemaphoreHandle_t	output_locker;
+	/*all backends*/
+	slist_t backend_list;
+	char	log_buf_th[ULOG_LINE_BUF_SIZE + 1];
 
-#ifdef ULOG_USING_ISR_LOG
-	ul_base_t output_locker_isr_lvl;
-	char log_buf_isr[ULOG_LINE_BUF_SIZE + 1];
-#endif	/*ULOG_USING_ISR_LOG*/
-
-#ifdef ULOG_USING_ASYNC_OUTPUT
-	ul_bool_t async_enabled;
-	ul_rbb_t  async_rbb;
-	/* ringbuffer for log_raw function only */
-	struct ul_ringbuffer *async_rb;
-	platform_thread_t async_th;
-	platform_mutex_t async_notice;
-#endif	/*ULOG_USING_ASYNC_OUTPUT*/
+#ifdef ULOG_USING_ASYNC_OUTPUT	/*Òì²½Êä³ö*/
+	bool	async_enabled;
+	rbb_t	async_rbb;
+	/*ringbuffer for log_raw function only*/
+	struct ringbuffer *async_rb;
+	TaskHandle_t async_th;
+	SemaphoreHandle_t async_notice;
+#endif/*ULOG_USING_ASYNC_OUTPUT*/
 
 #ifdef ULOG_USING_FILTER
-	struct 
+	struct
 	{
-		ul_slist_t tag_lvl_list;
-		ul_uint32_t level;
+		/*all tag's level filter*/
+		slist_t tag_lvl_list;
+		/*global filter level,tag and keyword*/
+		uint32_t level;
 		char tag[ULOG_FILTER_TAG_MAX_LEN + 1];
 		char keyword[ULOG_FILTER_KW_MAX_LEN + 1];
 	}filter;
-#endif /*ULOG_USING_FILTER*/
-
+#endif/*ULOG_USING_FILTER*/
 };
 
-
-/* level output info */
-static const char * const level_output_info[] = 
+/*level output info*/
+static const char *const level_output_info[] =
 {
 	"A/",
-	UL_NULL,
-	UL_NULL,
+	NULL,
+	NULL,
 	"E/",
 	"W/",
-	UL_NULL,
+	NULL,
 	"I/",
 	"D/",
 };
-	
+
+
+
 
 #ifdef ULOG_USING_COLOR
-/* color output info */
-static const char * const color_output_info[] = 
+static const char *const color_output_info[] =
 {
-	ULOG_COLOR_ASSERT,
-	UL_NULL,
-	UL_NULL,
-	ULOG_COLOR_ERROR,
-	ULOG_COLOR_WARN,
-	UL_NULL,
-	ULOG_COLOR_INFO,
-	ULOG_COLOR_DEBUG,
-};
-#endif /*ULOG_USING_COLOR*/
+		ULOG_COLOR_ASSERT,
+		NULL,
+		NULL,
+		ULOG_COLOR_ERROR,
+		ULOG_COLOR_WARN,
+		NULL,
+		ULOG_COLOR_INFO,
+		ULOG_COLOR_DEBUG,
+};
+#endif/*ULOG_USING_COLOR*/
 
 
-/* ulog local object */
-static struct ul_ulog ulog = {0};
+static struct ulog_t ulog = {0};
 
 
 /* ulog_strcpy
- * å°†srcæ•°æ®æ‹·è´åˆ°dstä¸­,æœ€å¤§æ‹·è´(128-cur_lenå­—èŠ‚)
- * cur_len:		
- * dst:		ç›®æ ‡åœ°å€
- * srcï¼š		æºæ•°æ®åœ°å€
- * return:	è¿”å›æ‹·è´äº†å¤šå°‘æ•°æ®(å­—èŠ‚)
- */
-ul_size_t ulog_strcpy(ul_size_t cur_len, char *dst, const char *src)
+ * ´Ócur_len¿ªÊ¼¿½±´srcµÄÊı¾İµ½dst»º³åÇø
+ * cur_len:µ±Ç°ulog»º³åÇøµÄÒÑÓĞµÄÊı¾İ³¤¶È
+ * dst:Ä¿±ê»º³åÇøµØÖ·
+ * src:Ô´Êı¾İµØÖ·
+ * */
+size_t ulog_strcpy(size_t cur_len,char *dst,const char *src)
 {
-    const char *src_old = src;
+	const char *src_old = src;
+	UL_ASSERT(dst);
+	UL_ASSERT(src);
 
-    UL_ASSERT(dst);/*æ–­è¨€,åˆ¤æ–­åœ°å€ä¸ä¸ºNULL*/
-    UL_ASSERT(src);
-
-    while (*src != 0)
-    {
-        /* make sure destination has enough space */
-        if (cur_len++ < ULOG_LINE_BUF_SIZE)
-        {
-            *dst++ = *src++;
-        }
-        else
-        {
-            break;
-        }
-    }
-    return src - src_old;
+	while(*src != 0)
+	{
+		if(cur_len++ < ULOG_LINE_BUF_SIZE)
+		{
+			*dst++ = *src++;
+		}
+		else
+		{
+			break;
+		}
+	}
+	return src - src_old;
 }
 
 /* ulog_ultoa
- * å°†ä¸€ä¸ªæ— ç¬¦å·æ•´æ•°è½¬æ¢ä¸ºå­—ç¬¦ä¸²
- * s:	è½¬æ¢åå­—ç¬¦ä¸²å­˜æ”¾åœ°å€
- * n:	è¦è½¬æ¢çš„æ•´å½¢æ•°
- * return:	è½¬æ¢åå­—ç¬¦ä¸²é•¿åº¦,å¤šä¸€ä¸ª'\0'
- */
-ul_size_t ulog_ultoa(char *s, unsigned long int n)
+ * ½«1¸öintÀàĞÍµÄÊı×Ö×ª»»Îª×Ö·û´®
+ * s:×Ö·û´®»º³åÇø
+ * n:Òª×ª»»µÄintÊı×Ö
+ * return×Ö·û³¤¶È
+ * */
+size_t ulog_ultoa(char *s,unsigned long int n)
 {
-    ul_size_t i = 0, j = 0, len = 0;
-    char swap;
-
-    do
-    {
-        s[len++] = n % 10 + '0';
-    } while (n /= 10);
-    s[len] = '\0';
-    /* reverse string */
-    for (i = 0, j = len - 1; i < j; ++i, --j)
-    {
-        swap = s[i];
-        s[i] = s[j];
-        s[j] = swap;
-    }
-    return len;
+	size_t i = 0,j = 0, len = 0;
+	char swap;
+	do{
+		s[len++] = n % 10 + '0';
+	}while(n /= 10);
+	s[len] = '\0';
+	for(i = 0, j = len - 1; i < j; ++i, --j)
+	{
+		swap = s[i];
+		s[i] = s[j];
+		s[j] = swap;
+	}
+	return len;
 }
 
-
 /* output_unlock
- * logè¾“å‡ºèµ„æºé‡Šæ”¾
- */
+ * ½âËø
+ * */
 static void output_unlock(void)
 {
-	if(ulog.output_lock_enabled == UL_FALSE)
+	if(ulog.output_lock_enabled == FALSE)
 	{
 		return;
 	}
-	/* if the scheduler is started and in thread context */
-	/* get_nest() == 0 è¡¨æ˜å½“å‰åœ¨çº¿ç¨‹ä¸­,æ²¡åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­,åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­ä¸èƒ½ä½¿ç”¨äº’æ–¥é‡
-	 * thread_self() != NULL è¡¨æ˜å½“å‰è°ƒåº¦å™¨å·²ç»å¯åŠ¨
-	 */
-	if(platform_interrupt_get_nest() == 0 && platform_thread_self() != UL_NULL)
+	/*»¹ÒªÅĞ¶Ïµ±Ç°ÊÇ·ñÔÚÖĞ¶ÏÖĞ*/
+	if(xTaskGetCurrentTaskHandle()!= NULL)/*µ±Ç°ÓĞÈÎÎñÔÚÖ´ĞĞ*/
 	{
-		/* è§£é” */
-		platform_Mutex_Give(&ulog.output_locker);
+		xSemaphoreGive(ulog.output_locker);
 	}
-	else
-	{
-#ifdef ULOG_USING_ISR_LOG
-		platform_interrupt_enable(ulog.output_locker_isr_lvl);/*ä½¿èƒ½ä¸­æ–­*/
-#endif
-	}
-	
+
 }
 
 /* output_lock
- * è¾“å‡ºä¸Šé”
- */
+ * ÉÏËø
+ * */
 static void output_lock(void)
 {
-	/* æ˜¯å¦ä½¿èƒ½é” */
-	if(ulog.output_lock_enabled == UL_FALSE)
+	if(ulog.output_lock_enabled == FALSE)
 	{
 		return;
 	}
+	if(xTaskGetCurrentTaskHandle()!= NULL)/*µ±Ç°ÓĞÈÎÎñÔÚÖ´ĞĞ*/
+	{
+		xSemaphoreTake(ulog.output_locker,portMAX_DELAY);
+	}
 
-	/* if the scheduler is started and in thread context */
-	/* get_nest() == 0 è¡¨æ˜å½“å‰åœ¨çº¿ç¨‹ä¸­,æ²¡åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­,åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­ä¸èƒ½ä½¿ç”¨äº’æ–¥é‡
-	 * thread_self() != NULL è¡¨æ˜å½“å‰è°ƒåº¦å™¨å·²ç»å¯åŠ¨
-	 */
-	if(platform_interrupt_get_nest() == 0 && platform_thread_self() != UL_NULL)
-	{
-		/* ä¸Šé” */
-		platform_Mutex_Take(&ulog.output_locker,platform_MAX_DELAY);
-	}
-	else
-	{
-#ifdef ULOG_USING_ISR_LOG
-		ulog.output_locker_isr_lvl = platform_interrupt_disable();
-#endif
-	}
 }
 
 
-/* ulog_output_lock_enabled
- * æ˜¯å¦ä½¿èƒ½äº’æ–¥é”
- * enable:RT_TURE:ä½¿èƒ½,RT_FALSE:ä¸ä½¿èƒ½
- */
-void ulog_output_lock_enabled(ul_bool_t enabled)
+/* ulog_output_lock_enable
+ * ÉèÖÃlogÊä³öµÄËø
+ * */
+void ulog_output_lock_enable(bool enabled)
 {
-    ulog.output_lock_enabled = enabled;
+	ulog.output_lock_enabled = enabled;
 }
 
 /* get_log_buf
- * è¿”å›logç¼“å†²åŒº
- * åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­,è¿”å›log_buf_isr,or return log_buf_th
- */
+ * ·µ»ØulogµÄbuf»º³åÇø
+ * */
 static char *get_log_buf(void)
 {
-	if(platform_interrupt_get_nest() == 0)/*æ¯åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­*/
-	{
-		return ulog.log_buf_th;
-	}
-	else/*åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­*/
-	{
-#ifdef ULOG_USING_ISR_LOG
-		return ulog.log_buf_isr;
-#else
-		ul_kprintf("Error: Current mode not supported run in ISR. Please enable ULOG_USING_ISR_LOG.\n");
-		return UL_NULL;
-#endif
-	}
+	return ulog.log_buf_th;
 }
 
-/* ulog_head_formater
- * æ ¼å¼åŒ–è¾“å‡º:æ·»åŠ å¤´ "\033[35m[time] A/tag name: "
- * log_buf:		logç¼“å†²åŒº
- * levelï¼š		è¾“å‡ºç­‰çº§
- * tagï¼š			æ ‡ç­¾
- */
-ul_size_t ulog_head_formater(char *log_buf, ul_uint32_t level, const char *tag)
+/* ulog_head_format
+ * ×é×°logµÄÍ·
+ * log_buf:¸ñÊ½»¯µÄºóµÄÊä³öµ½µÄ»º³åÇø
+ * level:Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * */
+size_t ulog_head_formater(char *log_buf, uint32_t level, const char *tag)
 {
-	/* the caller has locker, so it can use static variable for reduce stack usage */
-	static ul_size_t log_len;
+	static size_t log_len;
+#ifdef ULOG_OUTPUT_TIME
+	static size_t tick_len = 0;
+#endif/*ULOG_OUTPUT_TIME*/
+
+#if ULOG_OUTPUT_THREAD_NAME
+	rt_size_t name_len = 0;
+	const char *thread_name = "N/A";
+#endif/*ULOG_OUTPUT_THREAD_NAME*/
 
 	UL_ASSERT(log_buf);
 	UL_ASSERT(level <= LOG_LVL_DBG);
 	UL_ASSERT(tag);
 
-#ifdef ULOG_USING_COLOR	/*ä½¿ç”¨é¢œè‰²*/
-	/* add CSI start sign and color info */
+	log_len = 0;
+#ifdef ULOG_USING_COLOR
 	if(color_output_info[level])
 	{
 		log_len += ulog_strcpy(log_len, log_buf + log_len, CSI_START);
 		log_len += ulog_strcpy(log_len, log_buf + log_len, color_output_info[level]);
 	}
-#endif	/*ULOG_USING_COLOR*/
-
+#endif/*ULOG_USING_COLOR*/
 	log_buf[log_len] = '\0';
 
+	/*add timestamp */
 #ifdef ULOG_OUTPUT_TIME
-	/* add time info */
-{
-#ifdef ULOG_TIME_USING_TIMESTAMP
-	static struct timeval now;
-	static struct tm *tm, tm_tmp;
-	static ul_bool_t check_usec_support = UL_FALSE, usec_is_support = UL_FALSE;
-	time_t t = (time_t)0;
-
-	if(gettimeofday(&now,UL_NULL) >= 0)
-	{
-		t = now.tv_sec;
-	}
-	tm = localtime_r(&t, &tm_tmp);
-	/* show the time format MM-DD HH:MM:SS */
-	ul_snprintf(log_buf + log_len, ULOG_LINE_BUF_SIZE - log_len, "%02d-%02d %02d:%02d:%02d", tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-	/* check the microseconds support when kernel is startup */	
-	if(t > 0 && !check_usec_support && platform_thread_self() != UL_NULL)
-	{
-		long old_usec = now.tv_usec;
-		/* delay some time for wait microseconds changed */
-		platform_thread_mdelay(10);
-		gettimeofday(&now, UL_NULL);
-		check_usec_support = UL_TRUE;
-		/* the microseconds is not equal between two gettimeofday calls */
-		if(now.tv_usec != old_usec)
-			usec_is_support = UL_TRUE;
-	}
-	if(usec_is_support)
-	{
-		/*show the millisecond */
-		log_len += ul_strlen(log_buf + log_len);
-		ul_snprintf(log_buf + log_len, ULOG_LINE_BUF_SIZE - log_len, ".%03d", now.tvusec / 1000);
-	}
-#else	/*æ·»åŠ æ—¶é—´ä¿¡æ¯*/
-	static ul_size_t tick_len = 0;
 	log_buf[log_len] = '[';
-	tick_len = ulog_ultoa(log_buf + log_len + 1,platform_getTickCount());
+	tick_len = ulog_ultoa(log_buf + log_len + 1,xTaskGetTickCount());
 	log_buf[log_len + 1 + tick_len] = ']';
 	log_buf[log_len + 1 + tick_len + 1] = '\0';
-#endif /*ULOG_TIME_USING_TIMESTAMP*/
-	log_len += ul_strlen(log_buf + log_len);
-}
-#endif /*ULOG_OUTPUT_TIME*/
-
+	log_len += strlen(log_buf + log_len);
+#endif/*ULOG_OUTPUT_TIME*/
 
 #ifdef ULOG_OUTPUT_LEVEL
 #ifdef ULOG_OUTPUT_TIME
 	log_len += ulog_strcpy(log_len, log_buf + log_len, " ");
-#endif
-	/* add level info */
+#endif/*ULOG_OUTPUT_TIME*/
+
+	/*add level info*/
 	log_len += ulog_strcpy(log_len, log_buf + log_len, level_output_info[level]);
-#endif /*ULOG_OUTPUT_LEVEL*/
+#endif/*ULOG_OUTPUT_LEVEL*/
 
-
-#ifdef ULOG_OUTPUT_TAG	/*ä½¿ç”¨æ ‡ç­¾*/
-
+#ifdef ULOG_OUTPUT_TAG
 #if !defined(ULOG_OUTPUT_LEVEL) && defined(ULOG_OUTPUT_TIME)
 	log_len += ulog_strcpy(log_len, log_buf + log_len, " ");
-#endif
+#endif /*!defined(ULOG_OUTPUT_LEVEL) && defined(ULOG_OUTPUT_TIME)*/
+	/*add tag info*/
+	log_len += ulog_strcpy(log_len, log_buf + log_len, tag);
+#endif/*ULOG_OUTPUT_TAG*/
 
-	/* add tag info
-  	 */
-  	log_len += ulog_strcpy(log_len, log_buf + log_len, tag);
-#endif /*ULOG_OUTPUT_TAG*/
-
-#ifdef ULOG_OUTPUT_THREAD_NAME	/*ä½¿ç”¨çº¿ç¨‹å*/
-	/* add thread info
-  	 */
-{
+#ifdef ULOG_OUTPUT_THREAD_NAME
 #if defined(ULOG_OUTPUT_TIME) || defined(ULOG_OUTPUT_LEVEL) || defined(ULOG_OUTPUT_TAG)
-	log_len += ulog_strcpy(log_len, log_buf + log_len, " ");
+	log_len += ulog_strcpy(log_len, log_buf + log_len," ");
 #endif
+	/*ÅĞ¶Ïµ±Ç°ÔËĞĞÈÎÎñ¿ØÖÆµÄÊÇ·ñÎª¿Õ*/
+	if(xTaskGetCurrentTaskHandle())/*µ±Ç°ÔËĞĞÈÎÎñµÄÈÎÎñ¿ØÖÆ¿é,ĞèÒªFreeRTOSÊµÏÖ*/
+	{
+		thread_name = pcTaskGetName(xTaskGetCurrentTaskHandle());
+	}
+	name_len = strnlen(thread_name,UL_NAME_MAX);
+	strncpy(log_buf + log_len, thread_name, name_len);
+	log_len += name_len;
 
-	/* is not in interrupt context */
-	if(platform_interrupt_get_nest() == 0)/*ä¸åœ¨ä¸­æ–­æœåŠ¡å‡½æ•°ä¸­*/
-	{
-		ul_size_t name_len = 0;
-		const char *thread_name = "N/A";
-		if(platform_thread_self())
-		{
-			thread_name = platform_thread_self()->thread->pcTaskName;
-		}
-		name_len = ul_strlen(thread_name,paltform_NAME_MAX);
-		ul_strncpy(log_buf + log_len, thread_name, name_len);
-		log_len += name_len;
-	}
-	else
-	{
-		log_len += ulog_strcpy(log_len, log_buf + log_len, "ISR");
-	}
-}
-#endif /*ULOG_OUTPUT_THREAD_NAME*/
+#endif/*ULOG_OUTUT_THREAD_NAME*/
 
 	log_len += ulog_strcpy(log_len, log_buf + log_len, ": ");
-
 	return log_len;
-
 }
 
 /* ulog_tail_formater
- * æ·»åŠ ulogå°¾æ ¼å¼,\r\n,æ˜¯å¦å¼€å§‹æ–°çš„è¡Œ	"\r\n\033[0m\0"
- * log_buf:		logç¼“å†²åŒº
- * log_len:		å½“å‰logç¼“å†²åŒºé‡Œé¢å­—ç¬¦é•¿åº¦
- * newlineï¼š		æ˜¯å¦è¾“å‡ºæ¢è¡Œç¬¦
- * level:		è¾“å‡ºç­‰çº§
- */
-ul_size_t ulog_tail_formater(char *log_buf, ul_size_t log_len, ul_bool_t newline, ul_uint32_t level)
+ * ×é×°logµÄÎ²
+ * log_buf:¸ñÊ½»¯µÄºóµÄÊä³öµ½µÄ»º³åÇø
+ * log_len:µ±Ç°logbufÓĞ¶àÉÙÊı¾İ
+ * newline:ÊÇ·ñÊ¹ÓÃ»»ĞĞ·û
+ * level:Êä³öµÈ¼¶
+ * */
+size_t ulog_tail_formater(char *log_buf, size_t log_len, bool newline, uint32_t level)
 {
-	static ul_size_t newline_len;
-
+	static size_t newline_len;
 	UL_ASSERT(log_buf);
-
-	/* æ¢è¡Œç¬¦å­—ç¬¦é•¿åº¦
-	 */
-	newline_len = ul_strlen(ULOG_NEWLINE_SIGN);
-
-#ifdef ULOG_USING_COLOR	/*ä½¿ç”¨é¢œè‰²*/
-	/* å¦‚æœlog_len > 128 å­—èŠ‚, 
-	 * CSI_END = "\033[0m"
-	 * é‚£ä¹ˆå°±è¦†ç›–å‰é¢çš„ä¸€äº›ä¿¡æ¯,æŠŠé¢œè‰²æ ¼å¼çš„å°¾éƒ¨åŠ ä¸Š
-	 * æŠŠæ¢è¡Œå’Œ'\0'åŠ ä¸Š
-     */
+	newline_len = strlen(ULOG_NEWLINE_SIGN);
+#ifdef ULOG_USING_COLOR
 	if(log_len + (sizeof(CSI_END) - 1) + newline_len + sizeof((char)'\0') > ULOG_LINE_BUF_SIZE)
 	{
 		log_len = ULOG_LINE_BUF_SIZE;
 		log_len -= (sizeof(CSI_END) - 1);
-#else 	/*ä¸ä½¿ç”¨é¢œè‰²*/
-	/* å¦‚æœlog_len > 128 
-	 * è¦†ç›–å‰é¢çš„ä¸€äº›æ‰“å°ä¿¡æ¯
- 	 */
+
+#else
 	if(log_len + newline_len + sizeof((char)'\0') > ULOG_LINE_BUF_SIZE)
 	{
 		log_len = ULOG_LINE_BUF_SIZE;
-#endif	/*ULOG_USING_COLOR*/
+#endif/*ULOG_USING_COLOR*/
 		log_len -= newline_len;
 		log_len -= sizeof((char)'\0');
 	}
 
-	/* æ·»åŠ æ¢è¡Œç¬¦
-	 */
 	if(newline)
 	{
 		log_len += ulog_strcpy(log_len, log_buf + log_len, ULOG_NEWLINE_SIGN);
 	}
 
-#ifdef ULOG_USING_COLOR	/*æ·»åŠ é¢œè‰²å°¾*/
+#ifdef ULOG_USING_COLOR
 	if(color_output_info[level])
 	{
 		log_len += ulog_strcpy(log_len, log_buf + log_len, CSI_END);
 	}
-#endif /*ULOG_USING_COLOR*/
+#endif/*ULOG_USING_COLOR*/
 
-	log_buf[log_len] = '\0';	/*æ·»åŠ å­—ç¬¦ä¸²ç»“æŸç¬¦*/
-
+	log_buf[log_len] = '\0';
 	return log_len;
 }
 
-
-
-
-
 /* ulog_formater
- * æ ¼å¼åŒ–è¾“å‡ºå­—ç¬¦åˆ°ç¼“å†²åŒº
- * log_buf:		å­—ç¬¦ä¸²ç¼“å†²åŒº
- * level:		è¾“å‡ºç­‰çº§
- * tag:			æ ‡ç­¾
- * newline:		æ˜¯å¦ä½¿ç”¨æ¢è¡Œ
- * formatï¼š		æ ¼å¼
- * args:		å¯å˜å½¢å‚åˆ—è¡¨
- */
-ul_size_t ulog_formater(char *log_buf, ul_uint32_t level, const char *tag, ul_bool_t newline, const char *format, va_list args)
+ * ¸ñÊ½»¯Êä³öµ½»º³åÇø
+ * log_buf:¸ñÊ½»¯ºóµÄÄÚÈİ´æ´¢»º³åÇø
+ * level:Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * newline:ÊÇ·ñÊä³ö»»ĞĞ·û
+ * format:Êä³ö¸ñÊ½
+ * args:¿É±äĞÎ²ÎÁĞ±í
+ * */
+size_t ulog_formater(char *log_buf, uint32_t level, const char *tag, bool newline, const char *format, va_list args)
 {
-	/* the caller has locker, so it can use static variable for reduce stack usage
-     */
-	static ul_size_t log_len;
+	/*the caller has locker,so it can use static variable for reduce stack usage*/
+	static size_t log_len;
 	static int fmt_result;
 
 	UL_ASSERT(log_buf);
 	UL_ASSERT(format);
 
-	/* log head
-	 * æ·»åŠ logå¤´ "\033[35m[time] A/tag name: "
-	 */
+	/*make log head*/
 	log_len = ulog_head_formater(log_buf, level, tag);
 
-	/* æ ¼å¼è¾“å‡ºå†…å®¹åˆ°log_buf
-	 * fmt_result = æ ¼å¼åŒ–åçš„å­—ç¬¦ä¸²é•¿åº¦
-	 */
-	fmt_result = ul_vsnprintf(log_buf + log_len, ULOG_LINE_BUF_SIZE - log_len, format, args);
+	fmt_result = vsnprintf(log_buf + log_len, ULOG_LINE_BUF_SIZE - log_len, format, args);
+
 
 	if((log_len + fmt_result <= ULOG_LINE_BUF_SIZE) && (fmt_result > -1))
 	{
@@ -480,123 +381,118 @@ ul_size_t ulog_formater(char *log_buf, ul_uint32_t level, const char *tag, ul_bo
 	}
 	else
 	{
-		/* using max length
-	 	 */
-	 	log_len = ULOG_LINE_BUF_SIZE;
+		log_len = ULOG_LINE_BUF_SIZE;
 	}
-	/* log tail
-	 * æ·»åŠ å°¾éƒ¨ "\r\n\033[0m\0"
-	 */
 	return ulog_tail_formater(log_buf, log_len, newline, level);
 }
 
-/* ulog_hex_formater
- * æ ¼å¼åŒ–è¾“å‡ºhexæ•°æ®åˆ°ç¼“å†²åŒº
- * log_buf:		å­—ç¬¦ä¸²ç¼“å†²åŒº
- * tag:			æ ‡ç­¾
- * bufï¼š			hexæ•°æ®ç¼“å†²åŒº
- * sizeï¼š		hexæ•°æ®é•¿åº¦
- * widthï¼š		ä¸€è¡Œè¾“å‡ºhexæ•°æ®ä¸ªæ•°
- * addr:		æ•°æ®åœ°å€
- */
-ul_size_t ulog_hex_formater(char *log_buf, const char *tag, const ul_uint8_t *buf, ul_size_t size, ul_size_t width, ul_base_t addr)
+/* ulog_hex_format
+ * Êä³öhex
+ * log_buf:log»º³åÇø
+ * tag:±êÇ©
+ * buf:hexÊı¾İ»º³åÇø
+ * size:hexÊı¾İ´óĞ¡
+ * width:1ĞĞµÄÊä³ö¿í¶È
+ * addr:Êı¾İµØÖ·
+ * */
+size_t ulog_hex_format(char *log_buf, const char *tag, const uint8_t *buf, size_t size, size_t width, uint32_t addr)
 {
-/* åˆ¤æ–­è¾“å…¥çš„hexå€¼å¯¹åº”asciiæ˜¯å¦æ˜¯å¯ä»¥æ˜¾ç¤ºçš„å­—ç¬¦
- */
-#define __is_print(ch)			((unsigned int)((ch) - ' ') < 127u - ' ')
-
-	static ul_size_t log_len,j;
+/*ÅĞ¶Ï×Ö·ûÊÇ·ñ¿ÉÒÔÏÔÊ¾*/
+#define __is_print(ch)		((unsigned int)((ch) - ' ') < 127u - ' ')
+	static size_t log_len,j;
 	static int fmt_result;
 	char dump_string[8];
 
 	UL_ASSERT(log_buf);
 	UL_ASSERT(buf);
-
-	/* æ·»åŠ logå¤´
-	 * "\033[35m[time] A/tag name: "
-	 */
+	/*log head*/
 	log_len = ulog_head_formater(log_buf, LOG_LVL_DBG, tag);
-
-	fmt_result = ul_snprintf(log_buf + log_len, ULOG_LINE_BUF_SIZE, "%04X-%04X: ", addr, addr + size);
-
-	if((fmt_result > -1) && fmt_result <= ULOG_LINE_BUF_SIZE)
+	/*log content*/
+	fmt_result = snprintf(log_buf + log_len, ULOG_LINE_BUF_SIZE, "%04x-%04x: ", (unsigned int)addr, (unsigned int)(addr + size));
+	/*calculate log length*/
+	if((fmt_result > -1) && (fmt_result <= ULOG_LINE_BUF_SIZE))
 	{
 		log_len += fmt_result;
 	}
-	else/*å­—ç¬¦ä¸²å¤ªé•¿äº†,å–æœ€å¤§å€¼*/
+	else
 	{
 		log_len = ULOG_LINE_BUF_SIZE;
 	}
-
-	/* dump hex ä¸€è¡Œæ‰“å°å¤šå°‘ä¸ªhexæ•°å­—*/
+	/*dump hex*/
 	for(j = 0; j < width; j++)
 	{
-		if(j < size)/*jè¦å°äºhexbufçš„å¤§å°*/
+		if(j < size)
 		{
-			ul_snprintf(dump_string, sizeof(dump_string), "%02X", buf[j]);
+			snprintf(dump_string, sizeof(dump_string), "%02X ", buf[j]);
 		}
 		else
 		{
-			ul_strncpy(dump_string, " ", sizeof(dump_string));
+			strncpy(dump_string, "   ", sizeof(dump_string));
 		}
 		log_len += ulog_strcpy(log_len, log_buf + log_len, dump_string);
-		if((j + 1) % 8 == 0)/*æ¯8ä¸ªhexè¾“å‡ºå æ‰“å°ä¸€ä¸ª" "ç©ºæ ¼*/
+		if((j + 1) % 8 == 0)
 		{
 			log_len += ulog_strcpy(log_len, log_buf + log_len, " ");
 		}
 	}
-	/* 1è¡Œçš„hexæ•°å­—æ‰“å°å®Œæˆ
-     * æ‰“å°ä¸€ä¸ªç©ºæ ¼
-     * å¼€å§‹æ‰“å°hexçš„asciiç 
-	 */
 	log_len += ulog_strcpy(log_len, log_buf + log_len, " ");
-	/* dump char for hex */
+	/*dump char for hex*/
 	for(j = 0; j < size; j++)
 	{
-		/* å¦‚æœå­—ç¬¦åœ¨32-127ä¹‹é—´è¡¨æ˜å¯ä»¥æ˜¾ç¤º
-		 * å¦åˆ™æ‰“å°ä¸€ä¸ª'.'
-	 	 */
-		ul_snprintf(dump_string, sizeof(dump_string), "%c", __is_print(buf[j]) ? buf[j] : '.');
+		snprintf(dump_string, sizeof(dump_string), "%c", __is_print(buf[j]) ? buf[j] : '.');
 		log_len += ulog_strcpy(log_len, log_buf + log_len, dump_string);
 	}
-	/* log tail
-	 */
-	return ulog_tail_formater(log_buf, log_len, UL_TRUE, LOG_LVL_DBG);
-
+	/*log tail*/
+	return ulog_tail_formater(log_buf, log_len, TRUE, LOG_LVL_DBG);
 }
+extern void ukuptstr(const char *str,int len);
 
-
-
-static void ulog_output_to_all_backend(ul_uint32_t level, const char *tag, ul_bool_t is_raw, const char *log, ul_size_t len)
+/* ulog_output_to_all_backend
+ * ËùÓĞºó¶ËÊä³ö
+ * level:Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * is_raw:ÊÇ·ñÊÇÔ­Ê¼Êı¾İ
+ * log:Êı¾İ»º³åÇø
+ * len:Êı¾İ»º³åÇøÓĞµãÊı¾İ³¤¶È
+ * */
+static void ulog_output_to_all_backend(uint32_t level, const char *tag, bool is_raw, const char *log, size_t len)
 {
-	ul_slist_t *node;
+	slist_t *node;
 	ulog_backend_t backend;
+#if !defined(ULOG_USING_COLOR) || defined(ULOG_USING_SYSLOG)
+#else
+	size_t color_info_len = 0,output_len = len;
+	const char *output_log = log;
+	size_t color_hdr_len;
+#endif
 
 	if(!ulog.init_ok)
 		return;
 
-	/* if there is no backend */
-	if(!ul_slist_first(&ulog.backend_list))
+	/*if there is no backend*/
+	if(!slist_first(&ulog.backend_list))/*Ã»ÓĞºó¶Ë,printfÊä³ö*/
 	{
-		rt_kputs(log);
+		uprintf("%s",log);
+
+		//ukupts(log);
+		//ukuptstr(log,len);
+		//dprintf("%s",log);
 		return;
 	}
 
-	/* output for all backends
-	 */
-	for(node = ul_slist_first(&ulog.backend_list); node; node = ul_slist_next(node))
+	/*output for all backends*/
+	for(node = slist_first(&ulog.backend_list); node; node = slist_next(node))
 	{
-		backend = ul_slist_entry(node, struct ulog_backend, list);
+		backend = slist_entry(node, struct ulog_backend, list);
 		if(backend->out_level < level)
 		{
 			continue;
 		}
-#if !defined(ULOG_USING_COLOR) || define(ULOG_USING_SYSLOG)
+#if !defined(ULOG_USING_COLOR) || defined(ULOG_USING_SYSLOG)
 		backend->output(backend, level, tag, is_raw, log, len);
-#else 
-		if(backend->filter && backend->filter(backend, level, tag, is_raw, log, len) == UL_FALSE)
+#else
+		if(backend->filter && backend->filter(backend, level, tag, is_raw, log, len) == FALSE)
 		{
-			/* backend's filter is not match, so skip output */
 			continue;
 		}
 		if(backend->support_color || is_raw)
@@ -605,42 +501,49 @@ static void ulog_output_to_all_backend(ul_uint32_t level, const char *tag, ul_bo
 		}
 		else
 		{
-			/* recalculate the log start address and log size when backend not supported color */
-			ul_size_t color_info_len = 0,output_len = len;
-			const char *output_log = log;
-			if(color_output_info[level] != UL_NULL)
-				color_info_len = ul_strlen(color_output_info[level]);
+			if(color_output_info[level] != NULL)
+			{
+				color_info_len = strlen(color_output_info[level]);
+			}
 			if(color_info_len)
 			{
-				ul_size_t color_hdr_len = ul_strlen(CSI_START) + color_info_len;
+				color_hdr_len = strlen(CSI_START) + color_info_len;
 				output_log += color_hdr_len;
 				output_len -= (color_hdr_len + (sizeof(CSI_END) - 1));
 			}
 			backend->output(backend, level, tag, is_raw, output_log, output_len);
 		}
-#endif /*!defined(ULOG_USING_COLOR) || defined(ULOG_USING_SYSLOG)*/
+#endif/*!defined(ULOG_USING_COLOR) || defined(ULOG_USING_SYSLOG)*/
 	}
-	
+
 }
 
-
-
-static void do_output(ul_uint32_t level, const char *tag, ul_bool_t is_raw, const char *log_buf, ul_size_t log_len)
+/* do_output
+ * Êä³öµ½ÆäËûµØ·½??
+ * level:Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * is_raw:Êä³öÔ­Ê¼Êı¾İ
+ * log_buf:log»º³åÇø
+ * log_len:log»º³åÇøÊı¾İ³¤¶È
+ * */
+static void do_output(uint32_t level, const char *tag, bool is_raw, const char *log_buf, size_t log_len)
 {
-#ifdef ULOG_USING_ASYNC_OUTPUT	/*åŒæ­¥è¾“å‡º*/
-	ul_size_t log_buf_size = log_len + sizeof((char)'\0');
+#ifdef ULOG_USING_ASYNC_OUTPUT
+	rbb_blk_t log_blk;
+	ulog_frame_t log_frame;
+	static bool already_output = FALSE;
+	size_t log_buf_size = log_len + sizeof((char)'\0');
 	if(ulog.async_enabled)
 	{
-		if(is_raw == UL_FALSE)
+		if(is_raw == FALSE)
 		{
-			rt_rbb_blk_t log_blk;
-			ulog_frame_t log_frame;
-
-			/* allocate log frame */
-			log_blk = rt_rbb_blk_alloc(ulog.async_rbb, RT_ALIGN(sizeof(struct ulog_frame) + lob_buf_size, RT_ALIGN_SIZE));
+			/* allocate log frame
+			 * ÉêÇëÒ»¸ö¿é
+			 * */
+			log_blk = rbb_blk_alloc(ulog.async_rbb, RT_ALIGN(sizeof(struct ulog_frame) + log_buf_size, RT_ALIGN_SIZE));
 			if(log_blk)
 			{
-				/* package the log frame */
+				/*package the log frame*/
 				log_frame = (ulog_frame_t)log_blk->buf;
 				log_frame->magic = ULOG_FRAME_MAGIC;
 				log_frame->is_raw = is_raw;
@@ -648,170 +551,129 @@ static void do_output(ul_uint32_t level, const char *tag, ul_bool_t is_raw, cons
 				log_frame->log_len = log_len;
 				log_frame->tag = tag;
 				log_frame->log = (const char *)log_blk->buf + sizeof(struct ulog_frame);
-				/* copy log data */
-				ul_strncpy((char *)(log_blk->buf + sizeof(struct ulog_frame)), log_buf, log_buf_size);
-				/* put the block */
-				rt_rbb_blk_put(log_blk);
-				/* send a notice */
-				rt_sem_release(&ulog.async_notice);
+				/* copy log data
+				 * ¿½±´log_bufÖĞµÄlogÊı¾İµ½»º³åÇø
+				 * */
+				strncpy((char*)(log_blk->buf + sizeof(struct ulog_frame)), log_buf, log_buf_size);
+				/* put the block
+				 * ¸üĞÂ¸Ã¿éµÄ×´Ì¬,ÒÑ¾­·ÅÈëÁËÊı¾İ
+				 * */
+				rbb_blk_put(log_blk);
+				/*send a notice*/
+				xSemaphoreGive(ulog.async_notice);
 			}
 			else
 			{
-				static ul_bool_t already_output = UL_FALSE;
-				if(already_output == UL_FALSE)
+				if(already_output == FALSE)
 				{
-					rt_kprintf("Warning: There is no enough buffer for saving async log,"
-								" please increase the ULOG_ASYNC_OUTPUT_BUF_SIZE option. \n");
-					already_output = UL_TRUE;
+					uprintf("Warning: There is no enough buffer for saving async log, please increase the ULOG_ASYNC_OUTPUT_SIZE option.\n");
+					already_output = TRUE;
 				}
 			}
 		}
-		else if(ulog.async_rb)
+		else if(ulog.async_rb)/*Ô­Ê¼Êä³ö,Ê¹ÓÃringbuffer*/
 		{
-			rt_ringbuffer_put(ulog.async_rb, (const ul_uint8_t *)log_buf, (ul_uint16_t)log_buf_size);
-			/* send a notice */
-			rt_sem_release(&ulog.async_notice);
+			/*Ğ´logbufµ½»·ĞÎ»º³åÇø*/
+			ringbuffer_put(ulog.async_rb, (const uint8_t *)log_buf, (uint16_t)log_len);
+			/*send a notice*/
+			xSemaphoreGive(ulog.async_notice);/*ÊÍ·ÅĞÅºÅÁ¿,¸æÖªÒì²½ÈÎÎñÊä³ö*/
 		}
 		return;
 	}
-#endif /*ULOG_USING_ASYNC_OUTPUT*/
-
-	/* is in thread context */
-	if(platform_interrupt_get_nest() == 0)
-	{
-		/* output to all backends */
-		ulog_output_to_all_backend(level, tag, is_raw, log_buf, log_len);
-	}
-	else
-	{
-#ifdef ULOG_BACKEND_USING_CONSOLE
-		/* We can't ensure that all backends support ISR context output.
-		 * So only using rt_kprintf when context is ISR */
-		extern void ulog_console_backend_output(struct ulog_backend *backend, rt_uint32_t level, const char *tag,
-				rt_bool_t is_raw, const char *log, rt_size_t len);
-		ulog_console_backend_output(RT_NULL, level, tag, is_raw, log_buf, log_len);
-#endif /* ULOG_BACKEND_USING_CONSOLE */
-
-	}
-
+#endif/*ULOG_USING_ASYNC_OUTPUT*/
+	ulog_output_to_all_backend(level, tag, is_raw, log_buf, log_len);
 }
 
 
-
-
-
 /* ulog_voutput
- * ulogè¾“å‡º
- * level:		è¾“å‡ºç­‰çº§
- * tagï¼š			æ ‡ç­¾
- * newlineï¼š		æ˜¯å¦æœ‰æ¢è¡Œç¬¦
- * hex_buf:		hexæ•°æ®ç¼“å†²åŒº
- * hex_size:	hexæ•°æ®å¤§å°
- * hex_width:	hexlogå®½åº¦,ä¸€è¡Œè¾“å‡ºå¤šå°‘ä¸ªhex
- * hex_addr:	hexæ•°æ®åœ°å€
- * formatï¼š		è¾“å‡ºæ ¼å¼
- * args:		å¯å˜å½¢å‚åˆ—è¡¨
- */
-void ulog_voutput(ul_uint32_t level, const char *tag, ul_bool_t newline, const ul_uint8_t *hex_buf, ul_size_t hex_size, ul_size_t hex_width, ul_base_t hex_addr, const char *format, va_list args)
+ * ¸ñÊ½»¯Êä³ö
+ * level:Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * newline:ÊÇ·ñÊä³ö»»ĞĞ
+ * hex_buf:hexĞÎÊ½Êä³öÊı¾İµØÖ·
+ * hex_size:hexÊı¾İ³¤¶È
+ * hex_width:hexÊä³öÃ¿ĞĞ³¤¶È
+ * hex_addr:hexÊı¾İµØÖ·
+ * format:Êä³ö¸ñÊ½
+ * args:¿É±äĞÎ²ÎÁĞ±í
+ * */
+void ulog_voutput(uint32_t level, const char *tag, bool newline, const uint8_t *hex_buf, size_t hex_size, size_t hex_width, uint32_t hex_addr, const char *format,va_list args)
 {
-	static ul_bool_t ulog_voutput_recursion = UL_FALSE;
-	char *log_buf = UL_NULL;
-	static ul_size_t log_len = 0;
 
-	UL_ASSERT(tag);/*æ–­è¨€,tagä¸èƒ½ä¸ºNULL*/
-	UL_ASSERT((format && !hex_buf) || (!format && hex_buf));/*æ–­è¨€,formatå’Œhex_bufä¸èƒ½åŒæ—¶ä¸ºNULL*/
-#ifndef ULOG_USING_SYSLOG		/*ä¸ä½¿ç”¨syslog*/
-	UL_ASSERT(level <= LOG_LVL_DBG);/*åˆ¤æ–­è¾“å‡ºç­‰çº§levelæ˜¯å¦æ»¡è¶³è¦æ±‚*/
-#else
-	UL_ASSERT(LOG_PRI(level) <= LOG_DEBUG);
-#endif
+	static bool ulog_voutput_recursion = FALSE;
+	char *log_buf = NULL;
+	static size_t log_len = 0;
+	UL_ASSERT(tag);
+	UL_ASSERT((format && !hex_buf) || (!format && hex_buf));
+	UL_ASSERT(level <= LOG_LVL_DBG);
 
-	if(!ulog.init_ok)/*ulog ä¸ºåˆå§‹åŒ–*/
+	if(!ulog.init_ok)
 	{
 		return;
 	}
 
 #ifdef ULOG_USING_FILTER
-#ifndef ULOG_USING_SYSLOG	/*ä¸ä½¿ç”¨syslog*/
-	/* levelè¶Šå¤§è¯´æ˜è¶Šä¸é‡è¦,
-	 * å¦‚æœè¾“å‡ºç­‰çº§å¤§äºè¿‡æ»¤å™¨æˆ–è€…tagçš„ç­‰çº§åˆ™ä¸è¾“å‡º
-     */
 	if(level > ulog.filter.level || level > ulog_tag_lvl_filter_get(tag))
 	{
 		return;
 	}
-#else
-	if(((LOG_MASK(LOG_PRI(level)) & ulog.filter.level) == 0) || ((LOG_MASK(LOG_PRI(level)) & ulog_tag_lvl_filter_get(tag)) == 0))
+	else if(!strstr(tag, ulog.filter.tag))
 	{
-		return;
-	}
-#endif /*ULOG_USING_SYSLOG*/
-	/*åœ¨tagå­—ç¬¦ä¸²ä¸­,æ²¡æ‰¾åˆ°ulog.filter.tag*/
-	else if(!ul_strstr(tag, ulog.filter.tag))
-	{
-		return;
-	}
-#endif	/*ULOG_USING_FILTER*/
 
-	/* è·å–ulogçš„logç¼“å†²åŒº
-  	 */
+		/*tag filter*/
+		return;
+	}
+#endif/*ULOG_USING_FILTER*/
+
+	/*get log buffer*/
 	log_buf = get_log_buf();
 
-	/* lock output
-	 */
+	/*lock output*/
 	output_lock();
-
-	/* If there is a recursion, we use a simple way */
-	if((ulog_voutput_recursion == UL_TRUE) && hex_buf == UL_NULL)
+	/*if there is a recursion,we use a simple way*/
+	if((ulog_voutput_recursion == TRUE) && (hex_buf == NULL))
 	{
-		ul_kprintf(format, args);
-		if(newline == UL_TRUE)
+		uprintf(format, args);
+		if(newline == TRUE)
 		{
-			ul_kprintf(ULOG_NEWLINE_SIGN);/*è¾“å‡ºæ¢è¡Œ*/
+			uprintf(ULOG_NEWLINE_SIGN);
 		}
 		output_unlock();
 		return;
 	}
 
-	ulog_voutput_recursion = UL_TRUE;
+	ulog_voutput_recursion = TRUE;
 
-	/* hex_buf == NULL æ­£å¸¸è¾“å‡º
-	 * hex_buf != NULL è¡¨ç¤ºè¦è¾“å‡ºhexæ•°æ®
-	 */
-	if(hex_buf == UL_NULL)
+	if(hex_buf == NULL)
 	{
-#ifndef ULOG_USING_SYSLOG
+
 		log_len = ulog_formater(log_buf, level, tag, newline, format, args);
-#else	
-		extern ul_size_t syslog_formater(char *log_buf, ul_uint8_t level, const char *tag, ul_bool_t newline, const char *format, va_list args);
-		log_len = syslog_formater(log_buf, level, tag, newline, format, args);
-#endif	/*ULOG_USING_SYSLOG*/
 	}
 	else
 	{
-		/* hex mode */
-		log_len = ulog_hex_formater(log_buf, tag, hex_buf, hex_size, hex_width, hex_addr);
+		log_len = ulog_hex_format(log_buf, tag, hex_buf, hex_size, hex_width, hex_addr);
+
 	}
 
 #ifdef ULOG_USING_FILTER
-	/* keyword filter */
+	/*keyword filter*/
 	if(ulog.filter.keyword[0] != '\0')
 	{
 		/*add string end sign*/
 		log_buf[log_len] = '\0';
-		/* find the keyword */
-		if(!ul_strstr(log_buf, ulog.filter.keyword))
+		/*find the keyword*/
+		if(!strstr(log_buf, ulog.filter.keyword))
 		{
-			ulog_voutput_recursion = UL_FALSE;
+			ulog_voutput_recursion = FALSE;
 			output_unlock();
 			return;
 		}
 	}
-#endif /*ULOG_USING_FILTER*/
 
-	do_output(level, tag, UL_FALSE, log_buf, log_len);
+#endif/*ULOG_USING_FILTER*/
+	do_output(level, tag, FALSE, log_buf, log_len);
 
-	ulog_voutput_recursion = UL_FALSE;
+	ulog_voutput_recursion = FALSE;
 
 	output_unlock();
 }
@@ -819,51 +681,60 @@ void ulog_voutput(ul_uint32_t level, const char *tag, ul_bool_t newline, const u
 
 
 /* ulog_output
- * ulogè¾“å‡º
- * level:		è¾“å‡ºç­‰çº§
- * tagï¼š			æ ‡ç­¾
- * newlineï¼š		æ˜¯å¦æœ‰æ¢è¡Œç¬¦
- * formatï¼š		è¾“å‡ºæ ¼å¼
- */
-void ulog_output(ul_uint32_t level, const char *tag, ul_bool_t newline, const char *format, ...)
+ * ¸ñÊ½»¯Êä³ö
+ * level:Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * newline:ÊÇ·ñÊä³ö»»ĞĞ
+ * format:Êä³ö¸ñÊ½
+ * */
+void ulog_output(uint32_t level, const char *tag, bool newline, const char *format, ...)
 {
 	va_list args;
-	va_start(args, format);
 
-	ulog_voutput(level, tag, newline, UL_NULL, 0, 0, 0, format, args);
+	va_start(args, format);
+	ulog_voutput(level, tag, newline, NULL, 0, 0, 0, format, args);
 
 	va_end(args);
 }
 
-
-void ulog_raw(const char *format,...)
+/* ulog_raw
+ * Êä³öÔ­Ê¼Êı¾İ
+ * format:¸ñÊ½»¯
+ * ...:¿É±äĞÎ²Î
+ * */
+void ulog_raw(const char *format, ...)
 {
-	ul_size_t log_len = 0;
-	char *log_buf = UL_NULL;
+	int i;
+
+	size_t log_len = 0;
+	char *log_buf = NULL;
 	va_list args;
 	int fmt_result;
 
-	UL_ASSERT(ulog.init_ok);
+	if(!ulog.init_ok)
+	{
+		return;
+	}
 
 #ifdef ULOG_USING_ASYNC_OUTPUT
-	if(ulog.async_rb == UL_NULL)
+	if(ulog.async_rb == NULL)/*Òì²½Êä³ö,´´½¨»·ĞÎ»º³åÇø¶ÔÏó*/
 	{
-		ulog.async_rb = rt_ringbuffer_create(ULOG_ASYNC_OUTPUT_BUF_SIZE);
+		ulog.async_rb = ringbuffer_create(ULOG_ASYNC_OUTPUT_SIZE);
 	}
-#endif	/*ULOG_USING_ASYNC_OUTPUT*/
+#endif
 
-	/* get log buffer */
+	/*get log buf*/
 	log_buf = get_log_buf();
 
-	/* lock output */
+	/*lock output*/
 	output_lock();
 
-	/* args point to the first variable parameter */
+	/*args point to the first variable parameter*/
 	va_start(args, format);
-	fmt_result = ul_vsnprintf(log_buf, ULOG_LINE_BUF_SIZE, format, args);
+	fmt_result = vsnprintf(log_buf, ULOG_LINE_BUF_SIZE, format, args);
 	va_end(args);
 
-	/* calculate log length */
+	/*calculate log length*/
 	if((fmt_result > -1) && (fmt_result <= ULOG_LINE_BUF_SIZE))
 	{
 		log_len = fmt_result;
@@ -873,52 +744,77 @@ void ulog_raw(const char *format,...)
 		log_len = ULOG_LINE_BUF_SIZE;
 	}
 
-	/* do log output
-	 */
-	do_output(LOG_LVL_DBG, "", UL_TRUE, log_buf, log_len);
+	if(log_buf[log_len] == '\0')
+	{
+		dprintf("ulog_raw : log line has 0\r\n");
+		for(i=0;i<=log_len;i++)
+		{
+			dprintf("log_buf[%d] = %c,%d\r\n",i,log_buf[i],log_buf[i]);
+		}
+	}
 
-	/* unlock output
-	 */
+	/*do log output*/
+	do_output(LOG_LVL_DBG, "", TRUE, log_buf, log_len);
+
+	/*unlock output*/
 	output_unlock();
-	
 }
 
-
-void ulog_hexdump(const char *tag, ul_size_t width, const ul_uint8_t *buf, ul_size_t size,...)
+/* ulog_hexdump
+ * Êä³öhexÊı¾İ
+ * tag:±êÇ©
+ * width:Êä³öÒ»ĞĞµÄ¿í¶È
+ * buf:hexÊı¾İ»º³åÇøµØÖ·
+ * size:hexÊı¾İ³¤¶È
+ * */
+void ulog_hexdump(const char *tag, size_t width, const uint8_t *buf, size_t size, ...)
 {
-	ul_size_t i, len;
+	size_t i, len;
 	va_list args;
-
 	va_start(args, size);
-
 	for(i = 0; i < size; i += width, buf += width)
 	{
 		if(i + width > size)
+		{
 			len = size - i;
+		}
 		else
+		{
 			len = width;
-		ulog_voutput(LOG_LVL_DBG, tag, UL_TRUE, buf, len, width, i, UL_NULL, args);
+		}
+		ulog_voutput(LOG_LVL_DBG, tag, TRUE, buf, len, width, i, NULL, args);
 	}
 	va_end(args);
 }
 
+#ifdef ULOG_USING_FILTER
 
-int ulog_be_lvl_filter_set(const char *be_name, ul_uint32_t level)
+/* ulog_be_lvl_filter_set
+ * ÉèÖÃÖ¸¶¨Ãû×Öºó¶ËµÄÊä³öµÈ¼¶,
+ * be_name:ºóÃæÃû×Ö
+ * level:¹ıÂËÆ÷Êä³öµÈ¼¶
+ * LOG_FILTER_LVL_SILENT:log²»Êä³ö,LOG_FILTER_LVL_ALL,
+ * */
+int ulog_be_lvl_filter_set(const char *be_name, uint32_t level)
 {
-	ul_slist_t *node = UL_NULL;
+	slist_t *node = NULL;
 	ulog_backend_t backend;
-	int result = RT_EOK;
+	int result = RT_OK;
 
 	if(level > LOG_FILTER_LVL_ALL)
-		return -RT_EINVAL;
+	{
+		return RT_FAIL;
+	}
 
 	if(!ulog.init_ok)
-		return result;
-
-	for(node = ul_slist_first(&ulog.backend_list); node; node = ul_slist_next(node))
 	{
-		backend = ul_slist_entry(node, struct ulog_backend, list);
-		if(ul_strncmp(backend->name, be_name, UL_NAME_MAX) == 0)
+		return result;
+	}
+
+	for(node = slist_first(&ulog.backend_list); node; node = slist_next(node))
+	{
+		backend = slist_entry(node, struct ulog_backend, list);
+		if(strncmp(backend->name, be_name, UL_NAME_MAX) == 0)
 		{
 			backend->out_level = level;
 		}
@@ -927,66 +823,72 @@ int ulog_be_lvl_filter_set(const char *be_name, ul_uint32_t level)
 }
 
 
-
-int ulog_tag_lvl_filter_set(const char *tag, ul_uint32_t level)
+/* ulog_tag_lvl_filter_set
+ * ÉèÖÃ±êÇ©µÄÊä³öµÈ¼¶
+ * tag:Ö¸¶¨µÄ±êÇ©
+ * level:Êä³öµÈ¼¶
+ * */
+int ulog_tag_lvl_filter_set(const char *tag, uint32_t level)
 {
-	ul_slist_t *node;
-	ulog_tag_lvl_filter tag_lvl = UL_NULL;
-	int result = RT_EOK;
+	slist_t *node;
+	ulog_tag_lvl_filter_t tag_lvl = NULL;
+	int result = RT_OK;
 
 	if(level > LOG_FILTER_LVL_ALL)
-		return -RT_EINVAL;
-	if(!ulog.init_ok)
-		return result;
-
-	/* lock output */
-	output_lock();
-
-	/* find the tag in list */
-	for(node = ul_slist_first(ulog_tag_lvl_list_get()); node; node = ul_slist_next(node))
 	{
-		tag_lvl = ul_slist_entry(node, struct ulog_tag_lvl_filter, list);
-		if(!ul_strncmp(tag_lvl->tag, tag, ULOG_FILTER_TAG_MAX_LEN))
+		return RT_FAIL;
+	}
+	if(!ulog.init_ok)
+	{
+		return result;
+	}
+
+	/*lock output*/
+	output_lock();
+	/*find the tag in list*/
+	for(node = slist_first(ulog_tag_lvl_list_get()); node; node = slist_next(node))
+	{
+		tag_lvl = slist_entry(node, struct ulog_tag_lvl_filter, list);
+		if(!strncmp(tag_lvl->tag, tag, ULOG_FILTER_TAG_MAX_LEN))
 		{
 			break;
 		}
 		else
 		{
-			tag_lvl = UL_NULL;
+			tag_lvl = NULL;
 		}
 	}
-	/* find ok */
+
+	/*find ok*/
 	if(tag_lvl)
 	{
-		if(level == LOG_FILTER_LVL_ALL)
+		if(level == LOG_FILTER_LVL_ALL)/*LOG_FILTER_LVL_ALL,Ö±½ÓÊä³ö²»¹ıÂË,°Ñ¸Ãtag´Ó¹ıÂËÆ÷Á´±íÒÆ³ı*/
 		{
-			/* remove current tag's level filter when input level is the lowest level */
-			ul_slist_remove(ulog_tag_lvl_list_get(), &tag_lvl->list);
-			ul_free(tag_lvl);
+			slist_remove(ulog_tag_lvl_list_get(), &tag_lvl->list);
+			vPortFree(tag_lvl);
 		}
 		else
 		{
-			/* update level */
 			tag_lvl->level = level;
 		}
 	}
-	else
+	else/*Ã»ÕÒµ½,Ìí¼Óµ½¹ıÂËÆ÷Á´±í*/
 	{
-		/* only add the new tag's level filer when level is not LOG_FILTER_LVL_ALL */
+		/*only add the new tag's level filer when level is not LOG_FILTER_LVL_ALL*/
 		if(level != LOG_FILTER_LVL_ALL)
 		{
-			/* new a tag's level filter */
-			tag_lvl = (ulog_tag_lvl_filter) rt_malloc(sizeof(struct ulog_tag_lvl_filter));
+			/*new a tag's level filter*/
+			tag_lvl = (ulog_tag_lvl_filter_t)pvPortMalloc(sizeof(struct ulog_tag_lvl_filter));
 			if(tag_lvl)
 			{
-				rt_memset(tag_lvl->tag, 0, sizeof(tag_lvl->tag));
-				rt_strncpy(tag_lvl->tag, tag, ULOG_FILTER_KW_MAX_LEN);
+				memset(tag_lvl->tag, 0, sizeof(tag_lvl->tag));
+				strncpy(tag_lvl->tag, tag, ULOG_FILTER_TAG_MAX_LEN);
 				tag_lvl->level = level;
-				ul_slist_append(ulog_tag_lvl_list_get(), &tag_lvl->list);
+				slist_append(ulog_tag_lvl_list_get(), &tag_lvl->list);
 			}
 			else
 			{
-				result = -RT_ENOMEM;
+				result = RT_FAIL;
 			}
 		}
 	}
@@ -994,52 +896,448 @@ int ulog_tag_lvl_filter_set(const char *tag, ul_uint32_t level)
 	return result;
 }
 
-
 /* ulog_tag_lvl_filter_get
- * æ‰¾åˆ°tagæ ‡ç­¾çš„è¾“å‡ºç­‰çº§level
- * tagï¼š		æ ‡ç­¾
- * returnï¼š	è¯¥æ ‡ç­¾çš„è¾“å‡ºç­‰çº§
- */
-ul_uint32_t ulog_tag_lvl_filter_get(const char *tag)
+ * »ñÈ¡Ö¸¶¨±êÇ©µÄ¹ıÂËÆ÷Êä³öµÈ¼¶
+ * tag:±êÇ©
+ * return:Êä³öµÈ¼¶
+ * */
+uint32_t ulog_tag_lvl_filter_get(const char *tag)
 {
-	ul_slist_t *node;
-	ulog_tag_lvl_filter_t tag_lvl = UL_NULL;
-	ul_uint32_t level = LOG_FILTER_LVL_ALL;
+	slist_t *node;
+	ulog_tag_lvl_filter_t tag_lvl = NULL;
+	uint32_t level = LOG_FILTER_LVL_ALL;
 
-	if(!ulog.init_ok)/*æœªåˆå§‹åŒ–*/
+	if(!ulog.init_ok)
 	{
 		return level;
 	}
 
-	/* lock output
-	 */
+	/*lock output*/
 	output_lock();
-	/* éå†ulogçš„tag_lvl_filteré“¾è¡¨,
-	 * æ‰¾åˆ°tagçš„levelç­‰çº§
-	 */
-	for(node = ul_slist_first(ulog_tag_lvl_list_get()); node; node = ul_slist_next(node))
+	/*find the tag in list*/
+	for(node = slist_first(ulog_tag_lvl_list_get()); node; node = slist_next(node))
 	{
-		tag_lvl = ul_slist_entry(node, struct ulog_tag_lvl_filter, list);
-		if(!ul_strncmp(tag_lvl->tag, tag, ULOG_FILTER_TAG_MAX_LEN))/*è¡¨æ˜æ‰¾åˆ°tagçš„è¿‡æ»¤å™¨é“¾è¡¨èŠ‚ç‚¹*/
+		tag_lvl = slist_entry(node, struct ulog_tag_lvl_filter, list);
+		if(!strncmp(tag_lvl->tag, tag, ULOG_FILTER_TAG_MAX_LEN))
 		{
-			level = tag_lvl->level;/*è¿”å›è¾“å‡ºlevel*/
+			level = tag_lvl->level;
 			break;
 		}
 	}
 
-	/* unlock output
-	 */
+	/*unlock output*/
 	output_unlock();
+
 	return level;
 }
 
 /* ulog_tag_lvl_list_get
- * è·å–ulogtagæ ‡ç­¾é“¾è¡¨çš„æ ¹èŠ‚ç‚¹
- * return è¿”å›ulogè¿‡æ»¤å™¨çš„æ ¹èŠ‚ç‚¹
- */
-ul_slist_t *ulog_tag_lvl_list_get(void)
+ * ·µ»Ø±êÇ©¹ıÂËÆ÷µÄÁ´±í
+ * */
+slist_t *ulog_tag_lvl_list_get(void)
 {
 	return &ulog.filter.tag_lvl_list;
+}
+
+/* ulog_global_filter_lvl_set
+ * ÉèÖÃÈ«¾ÖµÄ¹ıÂËÆ÷µÈ¼¶
+ * level:µÈ¼¶
+ * */
+void ulog_global_filter_lvl_set(uint32_t level)
+{
+	UL_ASSERT(level <= LOG_FILTER_LVL_ALL);
+	ulog.filter.level = level;
+}
+
+/* ulog_global_filter_lvl_get
+ * ·µ»ØÈ«¾ÖµÄ¹ıÂËÆ÷µÈ¼¶
+ * */
+uint32_t ulog_global_filter_lvl_get(void)
+{
+	return ulog.filter.level;
+}
+
+/* ulog_global_filter_tag_set
+ * ÉèÖÃÈ«¾Ö¹ıÂËÆ÷±êÇ©
+ * tag:±êÇ©
+ * */
+void ulog_global_filter_tag_set(const char *tag)
+{
+	UL_ASSERT(tag);
+	strncpy(ulog.filter.tag, tag, ULOG_FILTER_TAG_MAX_LEN);
+}
+
+/* ulog_global_filetr_tag_get
+ * ·µ»ØÈ«¾Ö¹ıÂËÆ÷±êÇ©
+ * */
+const char *ulog_global_filetr_tag_get(void)
+{
+	return ulog.filter.tag;
+}
+
+/* ulog_global_filter_kw_set
+ * ÉèÖÃÈ«¾Ö¹ıÂË¹Ø¼ü×Ö
+ * keyword:¹Ø¼ü×Ö
+ * */
+void ulog_global_filter_kw_set(const char *keyword)
+{
+	UL_ASSERT(keyword);
+	strncpy(ulog.filter.keyword, keyword, ULOG_FILTER_KW_MAX_LEN);
+}
+
+/* ulog_global_filter_kw_get
+ * »ñÈ¡È«¾Ö¹ıÂË¹Ø¼ü×Ö
+ * */
+const char *ulog_global_filter_kw_get(void)
+{
+	return ulog.filter.keyword;
+}
+
+#endif/*ULOG_USING_FILTER*/
+
+
+/* ulog_backend_register
+ * ×¢²áÒ»¸öºó¶ËÊä³ö
+ * backend:ºó¶Ë½á¹¹Ìå
+ * name:ºó¶ËÃû×Ö
+ * support_color:ÊÇ·ñÖ§³ÖÑÕÉ«Êä³ö
+ * */
+uint8_t ulog_backend_register(ulog_backend_t backend, const char *name, bool support_color)
+{
+	UL_ASSERT(backend);
+	UL_ASSERT(name);
+	UL_ASSERT(ulog.init_ok);
+	UL_ASSERT(backend->output);
+
+	if(backend->init)
+	{
+		backend->init(backend);
+	}
+
+	backend->support_color = support_color;
+	backend->out_level = LOG_FILTER_LVL_ALL;
+	strncpy(backend->name, name, UL_NAME_MAX);
+
+	taskENTER_CRITICAL();
+	slist_append(&ulog.backend_list, &backend->list);
+	taskEXIT_CRITICAL();
+
+	return RT_OK;
+
+}
+
+/* ulog_backend_unregister
+ * ×¢ÏúÒ»¸öºó¶ËÊä³ö
+ * backend:ºó¶Ë¾ä±ú
+ * */
+uint8_t ulog_backend_unregister(ulog_backend_t backend)
+{
+	UL_ASSERT(backend);
+	UL_ASSERT(ulog.init_ok);
+
+	if(backend->deinit)
+	{
+		backend->deinit(backend);
+	}
+	taskENTER_CRITICAL();
+	slist_remove(&ulog.backend_list, &backend->list);
+	taskEXIT_CRITICAL();
+
+	return RT_OK;
+}
+
+/* ulog_backend_set_filter
+ * ÉèÖÃºó¶ËÊä³öµÄ¹ıÂËÆ÷
+ * backend:ºó¶Ë¾ä±ú
+ * filter:¹ıÂËÆ÷
+ * */
+uint8_t ulog_backend_set_filter(ulog_backend_t backend, ulog_backend_filter_t filter)
+{
+	UL_ASSERT(backend);
+
+	taskENTER_CRITICAL();
+	backend->filter = filter;
+	taskEXIT_CRITICAL();
+	return RT_OK;
+}
+
+/* ulog_backend_find
+ * ¸ù¾İÃû×ÖÕÒµ½ºó¶Ë¾ä±ú
+ * name:ºó¶ËÃû×Ö
+ * */
+ulog_backend_t ulog_backend_find(const char *name)
+{
+	slist_t *node;
+	ulog_backend_t backend;
+	UL_ASSERT(ulog.init_ok);
+
+	taskENTER_CRITICAL();
+	for(node = slist_first(&ulog.backend_list); node; node = slist_next(node))
+	{
+		backend = slist_entry(node, struct ulog_backend, list);
+		if(strncmp(backend->name, name, UL_NAME_MAX) == 0)
+		{
+			taskEXIT_CRITICAL();
+			return backend;
+		}
+	}
+
+
+	taskEXIT_CRITICAL();
+	return NULL;
+}
+
+#ifdef ULOG_USING_ASYNC_OUTPUT
+
+/* ulog_async_output
+ * Òì²½Êä³ö
+ * */
+void ulog_async_output(void)
+{
+	rbb_blk_t log_blk;
+	ulog_frame_t log_frame;
+	size_t log_len;
+	char *log;
+	size_t len;
+	if(!ulog.async_enabled)
+	{
+		return;
+	}
+	/* ´Órbb->blk_listÖĞÕÒÒÑ¾­PUTµÄ¿é
+	 * */
+	while((log_blk = rbb_blk_get(ulog.async_rbb)) != NULL)
+	{
+		log_frame = (ulog_frame_t)log_blk->buf;
+		if(log_frame->magic == ULOG_FRAME_MAGIC)/*ÅĞ¶ÏÍ·*/
+		{
+			/*output to all backends*/
+			ulog_output_to_all_backend(log_frame->level, log_frame->tag, log_frame->is_raw, log_frame->log, log_frame->log_len);
+		}
+		/*ÊÍ·Å¿é*/
+		rbb_blk_free(ulog.async_rbb, log_blk);
+	}
+	/* Ô­Ê¼Êı¾İÊä³ö
+	 * ringbuffer
+	 * */
+	if(ulog.async_rb)
+	{
+		/*»ñÈ¡ringbufferÓĞĞ§Êı¾İ¸öÊı*/
+		log_len = ringbuffer_data_len(ulog.async_rb);
+		log = pvPortMalloc(log_len + 1);/*ÉêÇë¿Õ¼ä*/
+		if(log)
+		{
+			/*´ÓringbufferÖĞ¶ÁÊı¾İµ½log»º³åÇø*/
+			len = ringbuffer_get(ulog.async_rb, (uint8_t*)log, (uint16_t)log_len);
+			log[log_len] = '\0';
+			ulog_output_to_all_backend(LOG_LVL_DBG, "", TRUE, log, len);/*Êä³ö*/
+			vPortFree(log);
+		}
+	}
+}
+
+/* ulog_async_output_enabled
+ * Òì²½Êä³öÊ¹ÄÜ
+ * enabled:ÊÇ·ñÊ¹ÄÜÒì²½Êä³ö
+ * */
+void ulog_async_output_enabled(bool enabled)
+{
+	ulog.async_enabled = enabled;
+}
+
+/* ulog_async_waiting_log
+ * µÈ´ıÓĞlogĞèÒªÊä³ö
+ * */
+uint8_t ulog_async_waiting_log(uint32_t time)
+{
+	BaseType_t nRet;
+
+	//rt_sem_control(&ulog.async_notice, RT_IPC_CMD_RESET, RT_NULL);
+	nRet = xSemaphoreTake(ulog.async_notice,time);
+	if(pdPASS != nRet)/*errQUEUE_EMPTY*/
+	{
+		return RT_FAIL;
+	}
+	return RT_OK;
+}
+
+static void async_output_thread_entry(void *param)
+{
+	ulog_async_output();
+	for(;;)
+	{
+		ulog_async_waiting_log(portMAX_DELAY);
+		for(;;)
+		{
+			ulog_async_output();
+			/* if there is no log output for a certain period of time,
+			 * refresh the log buffer
+			 * */
+			if(ulog_async_waiting_log(pdMS_TO_TICKS(2000)) == RT_OK)
+			{
+				continue;
+			}
+			else
+			{
+				ulog_flush();
+				break;
+			}
+		}
+	}
+}
+
+#endif/*ULOG_USING_ASYNC_OUTPUT*/
+
+/* ulog_flush
+ * flushËùÓĞºó¶ËµÄlog
+ * */
+void ulog_flush(void)
+{
+	slist_t *node;
+	ulog_backend_t backend;
+	if(!ulog.init_ok)
+	{
+		return;
+	}
+#ifdef ULOG_USING_ASYNC_OUTPUT
+	ulog_async_output();
+#endif/*ULOG_USING_ASYNC_OUTPUT*/
+
+	/*flush all backends*/
+	for(node = slist_first(&ulog.backend_list); node; node = slist_next(node))
+	{
+		backend = slist_entry(node, struct ulog_backend, list);
+		if(backend->flush)
+		{
+			backend->flush(backend);
+		}
+	}
+
+}
+
+
+/* ulog_init
+ * ulog ³õÊ¼»¯
+ * */
+int ulog_init(void)
+{
+	if(ulog.init_ok)
+		return RT_OK;
+	/*³õÊ¼»¯»¥³âÁ¿*/
+	ulog.output_locker = xSemaphoreCreateMutex();
+	if(NULL == ulog.output_locker)
+	{
+		return RT_FAIL;/*»¥³âÁ¿´´½¨Ê§°Ü*/
+	}
+	ulog.output_lock_enabled = TRUE;
+	slist_init(&ulog.backend_list);
+
+#ifdef ULOG_USING_FILTER
+	slist_init(ulog_tag_lvl_list_get());
+#endif/*ULOG_USING_FILTER*/
+
+#ifdef ULOG_USING_ASYNC_OUTPUT
+	UL_ASSERT(ULOG_ASYNC_OUTPUT_STORE_LINES>=2);
+	ulog.async_enabled = TRUE;
+	/*async output ring block buffer*/
+	ulog.async_rbb = rbb_create(RT_ALIGN(ULOG_ASYNC_OUTPUT_BUF_SIZE, RT_ALIGN_SIZE), ULOG_ASYNC_OUTPUT_STORE_LINES);
+	if(ulog.async_rbb == NULL)
+	{
+		uprintf("Error:ulog init failed! no memory for async rbb.\n");
+		vSemaphoreDelete(ulog.output_locker);
+		return RT_FAIL;
+	}
+	ulog.async_notice = xSemaphoreCreateBinary();
+	if(ulog.async_notice == NULL)
+	{
+		vSemaphoreDelete(ulog.output_locker);
+		return RT_FAIL;
+	}
+	ulog_async_init();
+#endif/*ULOG_USING_ASYNC_OUTPUT*/
+
+#ifdef ULOG_USING_FILTER
+	ulog_global_filter_lvl_set(LOG_FILTER_LVL_ALL);
+#endif/*ULOG_USING_FILTER*/
+	ulog.init_ok = TRUE;
+	return RT_OK;
+}
+
+
+#ifdef ULOG_USING_ASYNC_OUTPUT
+/* ulog_async_init
+ * ulogÒì²½Êä³ö³õÊ¼»¯,´´½¨Òì²½Êä³öÈÎÎñ
+ * */
+int ulog_async_init(void)
+{
+	if(ulog.async_th == NULL)
+	{
+		/*async output thread*/
+		if(pdPASS != xTaskCreate(async_output_thread_entry, "ulog_async", 512, NULL, 1, &ulog.async_th))
+		{
+			uprintf("Error: ulog init failed! No memory for asycn output thread.\n");
+			return RT_FAIL;
+		}
+	}
+	return RT_OK;
+}
+
+#endif/*ULOG_USING_ASYNC_OUTPUT*/
+
+
+/* ulog_deinit
+ * ulogÊ§ÄÜ
+ * */
+void ulog_deinit(void)
+{
+	slist_t *node;
+	ulog_backend_t backend;
+#ifdef ULOG_USING_FILTER
+	ulog_tag_lvl_filter_t tag_lvl;
+#endif/*ULOG_USING_FILTER*/
+
+	if(!ulog.init_ok)
+	{
+		return;
+	}
+	/*deinit all backends*/
+	for(node = slist_first(&ulog.backend_list); node; node = slist_next(node))
+	{
+		backend = slist_entry(node, struct ulog_backend, list);
+		if(backend->deinit)
+		{
+			backend->deinit(backend);
+		}
+	}
+
+#ifdef ULOG_USING_FILTER
+	/*deinit tag's level filter*/
+	for(node = slist_first(ulog_tag_lvl_list_get()); node; node = slist_next(node))
+	{
+		tag_lvl = slist_entry(node, struct ulog_tag_lvl_filter, list);
+		vPortFree(tag_lvl);
+	}
+
+#endif/*ULOG_USING_FILTER*/
+
+
+	/*Ïú»Ù»¥³âÁ¿*/
+	vSemaphoreDelete(ulog.output_locker);
+
+#ifdef ULOG_USING_ASYNC_OUTPUT
+	rbb_destroy(ulog.async_rbb);
+	if(ulog.async_th != NULL)/*·ÀÖ¹É¾³ıµ±Ç°ÈÎÎñ*/
+	{
+		vTaskDelete(ulog.async_th);
+	}
+	if(ulog.async_rb)
+	{
+		ringbuffer_destroy(ulog.async_rb);
+	}
+
+#endif
+
+	ulog.init_ok = FALSE;
+
 }
 
 
